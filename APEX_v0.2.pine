@@ -64,7 +64,7 @@ type Zone
     int barIndex
     float highPrice
     float lowPrice
-    string type  // "DEMAND" or "SUPPLY"
+    string zoneType  // "DEMAND" or "SUPPLY"
     float apexScore
     int touchCount
     bool isActive
@@ -73,60 +73,35 @@ type Zone
 
 var array<Zone> activeZones = array.new<Zone>()
 
-// Market structure state
-var string lastTrend = "NEUTRAL"  // "BULLISH", "BEARISH", "NEUTRAL"
-var float lastHigh = 0.0
-var float lastLow = 0.0
-var int lastBreakOfStructureBar = 0
+// Market structure state (updated in main logic)
+var string marketTrend = "NEUTRAL"  // "BULLISH", "BEARISH", "NEUTRAL"
+var float swingHigh = 0.0
+var float swingLow = 0.0
 
 // ============================================================================
 // SECTION 4: HELPER FUNCTIONS - MARKET STRUCTURE
 // ============================================================================
 
 // Detect Higher Highs, Higher Lows, Lower Highs, Lower Lows
-f_detectMarketStructure() =>
-    var float prevSwingHigh = na
-    var float prevSwingLow = na
-    var int prevSwingHighBar = 0
-    var int prevSwingLowBar = 0
+// Returns: [trend, swingHigh, swingLow] - no global modifications
+f_detectMarketStructure(lookbackBars) =>
+    // Use ta.highest and ta.lowest for swing detection
+    recentHigh = ta.highest(high, lookbackBars)
+    recentLow = ta.lowest(low, lookbackBars)
     
-    var int consecutiveHH = 0
-    var int consecutiveHL = 0
-    var int consecutiveLH = 0
-    var int consecutiveLL = 0
+    // Track higher/lower structure
+    priorHigh = ta.highest(high, lookbackBars * 2)[lookbackBars]
+    priorLow = ta.lowest(low, lookbackBars * 2)[lookbackBars]
     
-    // Simplified: check if current bar's high/low breaks previous swings
-    currentHigh = high
-    currentLow = low
+    currentTrend = "NEUTRAL"
     
-    trend = lastTrend
+    // Determine trend based on recent structure
+    if recentHigh > priorHigh and recentLow > priorLow
+        currentTrend := "BULLISH"
+    else if recentHigh < priorHigh and recentLow < priorLow
+        currentTrend := "BEARISH"
     
-    // Update swing tracking (every bar for simplicity; can optimize)
-    if currentHigh > prevSwingHigh or na(prevSwingHigh)
-        prevSwingHigh := currentHigh
-        prevSwingHighBar := bar_index
-        consecutiveHH += 1
-    
-    if currentLow < prevSwingLow or na(prevSwingLow)
-        prevSwingLow := currentLow
-        prevSwingLowBar := bar_index
-        consecutiveLL += 1
-    
-    // Determine dominant trend
-    if consecutiveHH >= 2
-        trend := "BULLISH"
-        consecutiveLL := 0
-    else if consecutiveLL >= 2
-        trend := "BEARISH"
-        consecutiveHH := 0
-    else
-        trend := "NEUTRAL"
-    
-    lastTrend := trend
-    lastHigh := prevSwingHigh
-    lastLow := prevSwingLow
-    
-    [trend, prevSwingHigh, prevSwingLow]
+    [currentTrend, recentHigh, recentLow]
 
 // ============================================================================
 // SECTION 5: HELPER FUNCTIONS - SUPPLY & DEMAND DETECTION
@@ -141,7 +116,6 @@ f_detectRBR(barsBack) =>
     // Look back: identify a dip (base) followed by rally attempts
     baseStart = bar_index - barsBack - 5
     baseEnd = bar_index - barsBack
-    currentBar = bar_index
     
     baseHigh = high[barsBack + 5]
     baseLow = low[barsBack + 5]
@@ -311,13 +285,14 @@ f_isRejectionCandle() =>
 f_drawZone(zoneType, zoneLow, zoneHigh, zoneScore, barIdx) =>
     if zoneScore >= minScoreDisplay
         zoneColor = zoneType == "DEMAND" ? color_demand : color_supply
+        borderColor = zoneType == "DEMAND" ? color_demand_border : color_supply_border
         
         box.new(
             left = barIdx,
             top = zoneHigh,
             right = bar_index,
             bottom = zoneLow,
-            border_color = zoneType == "DEMAND" ? color_demand_border : color_supply_border,
+            border_color = borderColor,
             border_width = 2,
             bgcolor = zoneColor
         )
@@ -329,7 +304,7 @@ f_drawZone(zoneType, zoneLow, zoneHigh, zoneScore, barIdx) =>
                 y = (zoneHigh + zoneLow) / 2,
                 text = str.tostring(math.round(zoneScore)),
                 textcolor = color.white,
-                bgcolor = labelColor,
+                color = labelColor,
                 style = label.style_label_left,
                 size = size.small
             )
@@ -339,7 +314,10 @@ f_drawZone(zoneType, zoneLow, zoneHigh, zoneScore, barIdx) =>
 // ============================================================================
 
 // Update market structure
-[trend, swingHigh, swingLow] = f_detectMarketStructure()
+[trend, structureHigh, structureLow] = f_detectMarketStructure(10)
+marketTrend := trend
+swingHigh := structureHigh
+swingLow := structureLow
 
 // Detect patterns every bar
 [isRBR, rbrLow, rbrHigh] = f_detectRBR(baseCandleCount)
