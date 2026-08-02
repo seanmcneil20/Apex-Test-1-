@@ -1,0 +1,394 @@
+//@version=6
+indicator("APEX v0.2 - Institutional Supply & Demand", overlay=true, max_bars_back=5000, max_lines_count=500, max_boxes_count=500)
+
+// ============================================================================
+// APEX v0.2 - Institutional Supply & Demand Indicator
+// Built on OTA Methodology with Weighted Scoring System
+// Pine Script v6 | Quality Over Quantity
+// ============================================================================
+
+// ============================================================================
+// SECTION 1: USER INPUTS
+// ============================================================================
+
+group_trading = "Trading Settings"
+tradingDirection = input.string("Both", "Trading Direction", options=["Long Only", "Short Only", "Both"], group=group_trading)
+strategyProfile = input.string("Balanced", "Strategy Profile", options=["Conservative", "Balanced", "Aggressive"], group=group_trading)
+maxZoneTouches = input.int(5, "Max Zone Touches Before Expiry", minval=1, maxval=20, group=group_trading)
+
+group_structure = "Structure & Timeframes"
+baseCandleCount = input.int(3, "Base Candle Count", minval=2, maxval=10, group=group_structure)
+htfPrimary = input.timeframe("60", "Higher Timeframe (Analysis)", group=group_structure)
+entryTimeframe = input.timeframe("5", "Entry Timeframe", group=group_structure)
+
+group_scoring = "Scoring Weights (%)"
+scoreHTFAlignment = input.float(20, "HTF Alignment Weight", minval=0, maxval=100, group=group_scoring)
+scoreFreshness = input.float(20, "Freshness Weight", minval=0, maxval=100, group=group_scoring)
+scoreDepartureStrength = input.float(20, "Departure Strength Weight", minval=0, maxval=100, group=group_scoring)
+scoreStructureBreak = input.float(15, "Structure Break Weight", minval=0, maxval=100, group=group_scoring)
+scoreFVG = input.float(10, "FVG / Imbalance Weight", minval=0, maxval=100, group=group_scoring)
+scoreLiquidity = input.float(10, "Liquidity Sweep Weight", minval=0, maxval=100, group=group_scoring)
+scoreVolume = input.float(5, "Volume Confirmation Weight", minval=0, maxval=100, group=group_scoring)
+
+group_display = "Display & Alerts"
+showLabels = input.bool(true, "Show Zone Labels", group=group_display)
+showScores = input.bool(true, "Show APEX Scores", group=group_display)
+showAdvancedMode = input.bool(false, "Advanced Mode (Details)", group=group_display)
+enableAlerts = input.bool(true, "Enable Alerts", group=group_display)
+minScoreDisplay = input.int(70, "Minimum Score to Display", minval=0, maxval=100, group=group_display)
+
+group_risk = "Risk Management"
+showRiskLevels = input.bool(true, "Show Risk Levels (SL/Target)", group=group_risk)
+slBuffer = input.float(2.0, "Stop Loss Buffer (% of Daily ATR)", minval=0.5, maxval=5, group=group_risk)
+riskRewardRatio = input.float(3.0, "Risk/Reward Ratio", minval=1, maxval=10, group=group_risk)
+
+// ============================================================================
+// SECTION 2: COLORS & CONSTANTS
+// ============================================================================
+
+color_demand = color.new(#26A69A, 80)  // Bullish - Teal
+color_supply = color.new(#F23645, 80)  // Bearish - Red
+color_demand_border = #26A69A
+color_supply_border = #F23645
+
+color_high_score = color.new(#00FF00, 60)  // Bright Green
+color_mid_score = color.new(#FFD700, 60)   // Gold
+color_low_score = color.new(#FF6347, 60)   // Tomato
+
+// ============================================================================
+// SECTION 3: DATA STRUCTURES & STATE MANAGEMENT
+// ============================================================================
+
+// Zone structure: stores zone data for tracking and scoring
+type Zone
+    int barIndex
+    float highPrice
+    float lowPrice
+    string type  // "DEMAND" or "SUPPLY"
+    float apexScore
+    int touchCount
+    bool isActive
+    bool isConfirmed
+    int confirmationPattern  // 0=none, 1=engulfing, 2=rejection, 3=displacement
+
+var array<Zone> activeZones = array.new<Zone>()
+
+// Market structure state
+var string lastTrend = "NEUTRAL"  // "BULLISH", "BEARISH", "NEUTRAL"
+var float lastHigh = 0.0
+var float lastLow = 0.0
+var int lastBreakOfStructureBar = 0
+
+// ============================================================================
+// SECTION 4: HELPER FUNCTIONS - MARKET STRUCTURE
+// ============================================================================
+
+// Detect Higher Highs, Higher Lows, Lower Highs, Lower Lows
+f_detectMarketStructure() =>
+    var float prevSwingHigh = na
+    var float prevSwingLow = na
+    var int prevSwingHighBar = 0
+    var int prevSwingLowBar = 0
+    
+    var int consecutiveHH = 0
+    var int consecutiveHL = 0
+    var int consecutiveLH = 0
+    var int consecutiveLL = 0
+    
+    // Simplified: check if current bar's high/low breaks previous swings
+    currentHigh = high
+    currentLow = low
+    
+    trend = lastTrend
+    
+    // Update swing tracking (every bar for simplicity; can optimize)
+    if currentHigh > prevSwingHigh or na(prevSwingHigh)
+        prevSwingHigh := currentHigh
+        prevSwingHighBar := bar_index
+        consecutiveHH += 1
+    
+    if currentLow < prevSwingLow or na(prevSwingLow)
+        prevSwingLow := currentLow
+        prevSwingLowBar := bar_index
+        consecutiveLL += 1
+    
+    // Determine dominant trend
+    if consecutiveHH >= 2
+        trend := "BULLISH"
+        consecutiveLL := 0
+    else if consecutiveLL >= 2
+        trend := "BEARISH"
+        consecutiveHH := 0
+    else
+        trend := "NEUTRAL"
+    
+    lastTrend := trend
+    lastHigh := prevSwingHigh
+    lastLow := prevSwingLow
+    
+    [trend, prevSwingHigh, prevSwingLow]
+
+// ============================================================================
+// SECTION 5: HELPER FUNCTIONS - SUPPLY & DEMAND DETECTION
+// ============================================================================
+
+// Detect Rally Base Rally (RBR) - DEMAND Zone
+// Pattern: Rally up → Base (consolidation) → Rally up again
+f_detectRBR(barsBack) =>
+    if bar_index < barsBack + 10
+        [false, 0.0, 0.0]
+    
+    // Look back: identify a dip (base) followed by rally attempts
+    baseStart = bar_index - barsBack - 5
+    baseEnd = bar_index - barsBack
+    currentBar = bar_index
+    
+    baseHigh = high[barsBack + 5]
+    baseLow = low[barsBack + 5]
+    
+    for i = baseStart to baseEnd
+        if low[i] < baseLow
+            baseLow := low[i]
+        if high[i] > baseHigh
+            baseHigh := high[i]
+    
+    // Check if we rallied before and after the base
+    priorRally = high[barsBack + 10] > baseHigh
+    currentRally = close > baseHigh
+    
+    isRBR = priorRally and currentRally
+    
+    [isRBR, baseLow, baseHigh]
+
+// Detect Drop Base Drop (DBD) - SUPPLY Zone
+// Pattern: Drop down → Base (consolidation) → Drop down again
+f_detectDBD(barsBack) =>
+    if bar_index < barsBack + 10
+        [false, 0.0, 0.0]
+    
+    baseStart = bar_index - barsBack - 5
+    baseEnd = bar_index - barsBack
+    
+    baseHigh = high[barsBack + 5]
+    baseLow = low[barsBack + 5]
+    
+    for i = baseStart to baseEnd
+        if low[i] < baseLow
+            baseLow := low[i]
+        if high[i] > baseHigh
+            baseHigh := high[i]
+    
+    // Check if we dropped before and after the base
+    priorDrop = low[barsBack + 10] < baseLow
+    currentDrop = close < baseLow
+    
+    isDBD = priorDrop and currentDrop
+    
+    [isDBD, baseLow, baseHigh]
+
+// Rally Base Drop (RBD) - SUPPLY Zone
+f_detectRBD(barsBack) =>
+    if bar_index < barsBack + 10
+        [false, 0.0, 0.0]
+    
+    baseStart = bar_index - barsBack - 5
+    baseEnd = bar_index - barsBack
+    
+    baseHigh = high[barsBack + 5]
+    baseLow = low[barsBack + 5]
+    
+    for i = baseStart to baseEnd
+        if low[i] < baseLow
+            baseLow := low[i]
+        if high[i] > baseHigh
+            baseHigh := high[i]
+    
+    // Prior rally, current drop
+    priorRally = high[barsBack + 10] > baseHigh
+    currentDrop = close < baseLow
+    
+    isRBD = priorRally and currentDrop
+    
+    [isRBD, baseLow, baseHigh]
+
+// Drop Base Rally (DBR) - DEMAND Zone
+f_detectDBR(barsBack) =>
+    if bar_index < barsBack + 10
+        [false, 0.0, 0.0]
+    
+    baseStart = bar_index - barsBack - 5
+    baseEnd = bar_index - barsBack
+    
+    baseHigh = high[barsBack + 5]
+    baseLow = low[barsBack + 5]
+    
+    for i = baseStart to baseEnd
+        if low[i] < baseLow
+            baseLow := low[i]
+        if high[i] > baseHigh
+            baseHigh := high[i]
+    
+    // Prior drop, current rally
+    priorDrop = low[barsBack + 10] < baseLow
+    currentRally = close > baseHigh
+    
+    isDBR = priorDrop and currentRally
+    
+    [isDBR, baseLow, baseHigh]
+
+// ============================================================================
+// SECTION 6: SCORING SYSTEM
+// ============================================================================
+
+// Calculate APEX Score (0-100) based on weighted criteria
+f_calculateAPEXScore(zoneType, zoneHigh, zoneLow, barIdx, departureStrength, breakOfStructure, fvgPresent, liquiditySweep, volumeConfirm, htfAligned) =>
+    
+    // Normalize weights
+    totalWeight = scoreHTFAlignment + scoreFreshness + scoreDepartureStrength + scoreStructureBreak + scoreFVG + scoreLiquidity + scoreVolume
+    w_htf = scoreHTFAlignment / totalWeight
+    w_fresh = scoreFreshness / totalWeight
+    w_dept = scoreDepartureStrength / totalWeight
+    w_struct = scoreStructureBreak / totalWeight
+    w_fvg = scoreFVG / totalWeight
+    w_liq = scoreLiquidity / totalWeight
+    w_vol = scoreVolume / totalWeight
+    
+    // Component scores (0-100)
+    score_htf = htfAligned ? 100 : 50
+    score_fresh = 100 - ((bar_index - barIdx) / 50 * 100)  // Decay over 50 bars
+    score_fresh := math.max(0, math.min(100, score_fresh))
+    score_dept = departureStrength * 100
+    score_struct = breakOfStructure ? 100 : 60
+    score_fvg = fvgPresent ? 100 : 50
+    score_liq = liquiditySweep ? 100 : 40
+    score_vol = volumeConfirm ? 100 : 60
+    
+    // Apply strategy profile adjustments
+    if strategyProfile == "Conservative"
+        score_fresh *= 1.1
+        score_struct *= 1.1
+    else if strategyProfile == "Aggressive"
+        score_dept *= 1.1
+        score_vol *= 0.9
+    
+    // Weighted final score
+    finalScore = (score_htf * w_htf + score_fresh * w_fresh + score_dept * w_dept + 
+                  score_struct * w_struct + score_fvg * w_fvg + score_liq * w_liq + score_vol * w_vol)
+    
+    math.min(100, math.max(0, finalScore))
+
+// ============================================================================
+// SECTION 7: ENTRY CONFIRMATION
+// ============================================================================
+
+// Detect bullish engulfing
+f_isBullishEngulfing() =>
+    if bar_index < 1
+        false
+    else
+        open[1] > close[1] and close > open[1] and open < close[1]
+
+// Detect bearish engulfing
+f_isBearishEngulfing() =>
+    if bar_index < 1
+        false
+    else
+        open[1] < close[1] and close < open[1] and open > close[1]
+
+// Detect rejection candle (large wick, small body)
+f_isRejectionCandle() =>
+    bodySize = math.abs(close - open)
+    upperWick = high - math.max(open, close)
+    lowerWick = math.min(open, close) - low
+    
+    (upperWick > bodySize * 1.5 or lowerWick > bodySize * 1.5) and bodySize > 0
+
+// ============================================================================
+// SECTION 8: VISUALIZATION
+// ============================================================================
+
+// Draw a supply or demand zone on chart
+f_drawZone(zoneType, zoneLow, zoneHigh, zoneScore, barIdx) =>
+    if zoneScore >= minScoreDisplay
+        zoneColor = zoneType == "DEMAND" ? color_demand : color_supply
+        
+        box.new(
+            left = barIdx,
+            top = zoneHigh,
+            right = bar_index,
+            bottom = zoneLow,
+            border_color = zoneType == "DEMAND" ? color_demand_border : color_supply_border,
+            border_width = 2,
+            bgcolor = zoneColor
+        )
+        
+        if showScores
+            labelColor = zoneScore >= 80 ? color_high_score : zoneScore >= 60 ? color_mid_score : color_low_score
+            label.new(
+                x = bar_index,
+                y = (zoneHigh + zoneLow) / 2,
+                text = str.tostring(math.round(zoneScore)),
+                textcolor = color.white,
+                bgcolor = labelColor,
+                style = label.style_label_left,
+                size = size.small
+            )
+
+// ============================================================================
+// SECTION 9: MAIN LOGIC
+// ============================================================================
+
+// Update market structure
+[trend, swingHigh, swingLow] = f_detectMarketStructure()
+
+// Detect patterns every bar
+[isRBR, rbrLow, rbrHigh] = f_detectRBR(baseCandleCount)
+[isDBD, dbdLow, dbdHigh] = f_detectDBD(baseCandleCount)
+[isRBD, rbdLow, rbdHigh] = f_detectRBD(baseCandleCount)
+[isDBR, dbrLow, dbrHigh] = f_detectDBR(baseCandleCount)
+
+// Detect confirmation patterns
+bullEngulf = f_isBullishEngulfing()
+bearEngulf = f_isBearishEngulfing()
+rejection = f_isRejectionCandle()
+
+// Calculate ATR for adaptive levels
+atr = ta.atr(14)
+
+// Check for departure strength (simplified)
+departureStrength = math.min(1.0, (high - low) / atr)
+
+// Process detected zones
+if isRBR and (tradingDirection == "Long Only" or tradingDirection == "Both")
+    apexScore = f_calculateAPEXScore("DEMAND", rbrHigh, rbrLow, bar_index, departureStrength, false, false, false, bullEngulf, trend == "BULLISH")
+    newZone = Zone.new(bar_index, rbrHigh, rbrLow, "DEMAND", apexScore, 0, true, bullEngulf, bullEngulf ? 1 : 0)
+    activeZones.push(newZone)
+    f_drawZone("DEMAND", rbrLow, rbrHigh, apexScore, bar_index)
+
+if isDBD and (tradingDirection == "Short Only" or tradingDirection == "Both")
+    apexScore = f_calculateAPEXScore("SUPPLY", dbdHigh, dbdLow, bar_index, departureStrength, false, false, false, bearEngulf, trend == "BEARISH")
+    newZone = Zone.new(bar_index, dbdHigh, dbdLow, "SUPPLY", apexScore, 0, true, bearEngulf, bearEngulf ? 1 : 0)
+    activeZones.push(newZone)
+    f_drawZone("SUPPLY", dbdLow, dbdHigh, apexScore, bar_index)
+
+if isRBD and (tradingDirection == "Short Only" or tradingDirection == "Both")
+    apexScore = f_calculateAPEXScore("SUPPLY", rbdHigh, rbdLow, bar_index, departureStrength, false, false, false, bearEngulf, trend == "BEARISH")
+    newZone = Zone.new(bar_index, rbdHigh, rbdLow, "SUPPLY", apexScore, 0, true, bearEngulf, bearEngulf ? 1 : 0)
+    activeZones.push(newZone)
+    f_drawZone("SUPPLY", rbdLow, rbdHigh, apexScore, bar_index)
+
+if isDBR and (tradingDirection == "Long Only" or tradingDirection == "Both")
+    apexScore = f_calculateAPEXScore("DEMAND", dbrHigh, dbrLow, bar_index, departureStrength, false, false, false, bullEngulf, trend == "BULLISH")
+    newZone = Zone.new(bar_index, dbrHigh, dbrLow, "DEMAND", apexScore, 0, true, bullEngulf, bullEngulf ? 1 : 0)
+    activeZones.push(newZone)
+    f_drawZone("DEMAND", dbrLow, dbrHigh, apexScore, bar_index)
+
+// ============================================================================
+// SECTION 10: ALERTS
+// ============================================================================
+
+if enableAlerts
+    if isRBR and tradingDirection != "Short Only"
+        alert("APEX: DEMAND Zone Detected (RBR)", alert.freq_once_per_bar)
+    if isDBD and tradingDirection != "Long Only"
+        alert("APEX: SUPPLY Zone Detected (DBD)", alert.freq_once_per_bar)
