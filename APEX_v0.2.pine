@@ -227,17 +227,17 @@ f_calculateAPEXScore(zoneType, zoneHigh, zoneLow, barIdx, departureStrength, bre
     w_liq = scoreLiquidity / totalWeight
     w_vol = scoreVolume / totalWeight
     
-    // Component scores (0-100)
-    score_htf = htfAligned ? 100.0 : 50.0
-    score_fresh = 100.0 - ((bar_index - barIdx) / 50.0 * 100.0)  // Decay over 50 bars
+    // Component scores (0-100) - EXPLICITLY DECLARE AS FLOAT
+    score_htf = float(htfAligned ? 100 : 50)
+    score_fresh = float(100 - ((bar_index - barIdx) / 50 * 100))  // Decay over 50 bars
     score_fresh := math.max(0.0, math.min(100.0, score_fresh))
-    score_dept = departureStrength * 100.0
-    score_struct = breakOfStructure ? 100.0 : 60.0
-    score_fvg = fvgPresent ? 100.0 : 50.0
-    score_liq = liquiditySweep ? 100.0 : 40.0
-    score_vol = volumeConfirm ? 100.0 : 60.0
+    score_dept = float(departureStrength * 100)
+    score_struct = float(breakOfStructure ? 100 : 60)
+    score_fvg = float(fvgPresent ? 100 : 50)
+    score_liq = float(liquiditySweep ? 100 : 40)
+    score_vol = float(volumeConfirm ? 100 : 60)
     
-    // Apply strategy profile adjustments (explicit float multipliers)
+    // Apply strategy profile adjustments
     if strategyProfile == "Conservative"
         score_fresh := score_fresh * 1.1
         score_struct := score_struct * 1.1
