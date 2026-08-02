@@ -228,28 +228,28 @@ f_calculateAPEXScore(zoneType, zoneHigh, zoneLow, barIdx, departureStrength, bre
     w_vol = scoreVolume / totalWeight
     
     // Component scores (0-100)
-    score_htf = htfAligned ? 100 : 50
-    score_fresh = 100 - ((bar_index - barIdx) / 50 * 100)  // Decay over 50 bars
-    score_fresh := math.max(0, math.min(100, score_fresh))
-    score_dept = departureStrength * 100
-    score_struct = breakOfStructure ? 100 : 60
-    score_fvg = fvgPresent ? 100 : 50
-    score_liq = liquiditySweep ? 100 : 40
-    score_vol = volumeConfirm ? 100 : 60
+    score_htf = htfAligned ? 100.0 : 50.0
+    score_fresh = 100.0 - ((bar_index - barIdx) / 50.0 * 100.0)  // Decay over 50 bars
+    score_fresh := math.max(0.0, math.min(100.0, score_fresh))
+    score_dept = departureStrength * 100.0
+    score_struct = breakOfStructure ? 100.0 : 60.0
+    score_fvg = fvgPresent ? 100.0 : 50.0
+    score_liq = liquiditySweep ? 100.0 : 40.0
+    score_vol = volumeConfirm ? 100.0 : 60.0
     
-    // Apply strategy profile adjustments
+    // Apply strategy profile adjustments (explicit float multipliers)
     if strategyProfile == "Conservative"
-        score_fresh *= 1.1
-        score_struct *= 1.1
+        score_fresh := score_fresh * 1.1
+        score_struct := score_struct * 1.1
     else if strategyProfile == "Aggressive"
-        score_dept *= 1.1
-        score_vol *= 0.9
+        score_dept := score_dept * 1.1
+        score_vol := score_vol * 0.9
     
     // Weighted final score
     finalScore = (score_htf * w_htf + score_fresh * w_fresh + score_dept * w_dept + 
                   score_struct * w_struct + score_fvg * w_fvg + score_liq * w_liq + score_vol * w_vol)
     
-    math.min(100, math.max(0, finalScore))
+    math.min(100.0, math.max(0.0, finalScore))
 
 // ============================================================================
 // SECTION 7: ENTRY CONFIRMATION
