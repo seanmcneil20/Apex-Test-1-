@@ -110,24 +110,17 @@ f_detectMarketStructure(lookbackBars) =>
 // Detect Rally Base Rally (RBR) - DEMAND Zone
 // Pattern: Rally up → Base (consolidation) → Rally up again
 f_detectRBR(barsBack) =>
-    if bar_index < barsBack + 10
+    if bar_index < barsBack + 20
         [false, 0.0, 0.0]
     
-    // Look back: identify a dip (base) followed by rally attempts
-    baseStart = bar_index - barsBack - 5
-    baseEnd = bar_index - barsBack
-    
-    baseHigh = high[barsBack + 5]
-    baseLow = low[barsBack + 5]
-    
-    for i = baseStart to baseEnd
-        if low[i] < baseLow
-            baseLow := low[i]
-        if high[i] > baseHigh
-            baseHigh := high[i]
+    // Use ta.lowest to find the base low safely
+    baseLow = ta.lowest(low, barsBack + 5)
+    baseHigh = ta.highest(high, barsBack + 5)
     
     // Check if we rallied before and after the base
+    // Prior bar should be above the base range
     priorRally = high[barsBack + 10] > baseHigh
+    // Current bar closes above the base range
     currentRally = close > baseHigh
     
     isRBR = priorRally and currentRally
@@ -137,20 +130,11 @@ f_detectRBR(barsBack) =>
 // Detect Drop Base Drop (DBD) - SUPPLY Zone
 // Pattern: Drop down → Base (consolidation) → Drop down again
 f_detectDBD(barsBack) =>
-    if bar_index < barsBack + 10
+    if bar_index < barsBack + 20
         [false, 0.0, 0.0]
     
-    baseStart = bar_index - barsBack - 5
-    baseEnd = bar_index - barsBack
-    
-    baseHigh = high[barsBack + 5]
-    baseLow = low[barsBack + 5]
-    
-    for i = baseStart to baseEnd
-        if low[i] < baseLow
-            baseLow := low[i]
-        if high[i] > baseHigh
-            baseHigh := high[i]
+    baseLow = ta.lowest(low, barsBack + 5)
+    baseHigh = ta.highest(high, barsBack + 5)
     
     // Check if we dropped before and after the base
     priorDrop = low[barsBack + 10] < baseLow
@@ -162,20 +146,11 @@ f_detectDBD(barsBack) =>
 
 // Rally Base Drop (RBD) - SUPPLY Zone
 f_detectRBD(barsBack) =>
-    if bar_index < barsBack + 10
+    if bar_index < barsBack + 20
         [false, 0.0, 0.0]
     
-    baseStart = bar_index - barsBack - 5
-    baseEnd = bar_index - barsBack
-    
-    baseHigh = high[barsBack + 5]
-    baseLow = low[barsBack + 5]
-    
-    for i = baseStart to baseEnd
-        if low[i] < baseLow
-            baseLow := low[i]
-        if high[i] > baseHigh
-            baseHigh := high[i]
+    baseLow = ta.lowest(low, barsBack + 5)
+    baseHigh = ta.highest(high, barsBack + 5)
     
     // Prior rally, current drop
     priorRally = high[barsBack + 10] > baseHigh
@@ -187,20 +162,11 @@ f_detectRBD(barsBack) =>
 
 // Drop Base Rally (DBR) - DEMAND Zone
 f_detectDBR(barsBack) =>
-    if bar_index < barsBack + 10
+    if bar_index < barsBack + 20
         [false, 0.0, 0.0]
     
-    baseStart = bar_index - barsBack - 5
-    baseEnd = bar_index - barsBack
-    
-    baseHigh = high[barsBack + 5]
-    baseLow = low[barsBack + 5]
-    
-    for i = baseStart to baseEnd
-        if low[i] < baseLow
-            baseLow := low[i]
-        if high[i] > baseHigh
-            baseHigh := high[i]
+    baseLow = ta.lowest(low, barsBack + 5)
+    baseHigh = ta.highest(high, barsBack + 5)
     
     // Prior drop, current rally
     priorDrop = low[barsBack + 10] < baseLow
