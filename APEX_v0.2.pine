@@ -36,6 +36,7 @@ showScores = input.bool(true, "Show APEX Scores", group=group_display)
 showAdvancedMode = input.bool(false, "Advanced Mode (Details)", group=group_display)
 enableAlerts = input.bool(true, "Enable Alerts", group=group_display)
 minScoreDisplay = input.int(70, "Minimum Score to Display", minval=0, maxval=100, group=group_display)
+showHTFZones = input.bool(true, "Show HTF Zone Alignment", group=group_display)
 
 group_risk = "Risk Management"
 showRiskLevels = input.bool(true, "Show Risk Levels (SL/Target)", group=group_risk)
@@ -55,6 +56,12 @@ color_high_score = color.new(#00FF00, 60)  // Bright Green
 color_mid_score = color.new(#FFD700, 60)   // Gold
 color_low_score = color.new(#FF6347, 60)   // Tomato
 
+color_htf_demand = color.new(#26A69A, 90)  // Subtle teal for HTF zones
+color_htf_supply = color.new(#F23645, 90)  // Subtle red for HTF zones
+
+color_sl = color.new(#FF0000, 70)  // Stop Loss line
+color_target = color.new(#00AA00, 70)  // Target line
+
 // ============================================================================
 // SECTION 3: DATA STRUCTURES & STATE MANAGEMENT
 // ============================================================================
@@ -70,8 +77,21 @@ type Zone
     bool isActive
     bool isConfirmed
     int confirmationPattern  // 0=none, 1=engulfing, 2=rejection, 3=displacement
+    bool isHTFAligned
+    float riskLevel  // Stop Loss price
+    float targetLevel  // Take Profit price
 
 var array<Zone> activeZones = array.new<Zone>()
+
+// HTF Zone tracking
+type HTFZone
+    float high
+    float low
+    string zoneType  // "DEMAND" or "SUPPLY"
+    int barCreated
+
+var array<HTFZone> htfDemandZones = array.new<HTFZone>()
+var array<HTFZone> htfSupplyZones = array.new<HTFZone>()
 
 // Market structure state (updated in main logic)
 var string marketTrend = "NEUTRAL"  // "BULLISH", "BEARISH", "NEUTRAL"
@@ -83,19 +103,16 @@ var float swingLow = 0.0
 // ============================================================================
 
 // Detect Higher Highs, Higher Lows, Lower Highs, Lower Lows
-// Returns: [trend, swingHigh, swingLow] - no global modifications
+// Returns: [trend, swingHigh, swingLow]
 f_detectMarketStructure(lookbackBars) =>
-    // Use ta.highest and ta.lowest for swing detection
     recentHigh = ta.highest(high, lookbackBars)
     recentLow = ta.lowest(low, lookbackBars)
     
-    // Track higher/lower structure
     priorHigh = ta.highest(high, lookbackBars * 2)[lookbackBars]
     priorLow = ta.lowest(low, lookbackBars * 2)[lookbackBars]
     
     currentTrend = "NEUTRAL"
     
-    // Determine trend based on recent structure
     if recentHigh > priorHigh and recentLow > priorLow
         currentTrend := "BULLISH"
     else if recentHigh < priorHigh and recentLow < priorLow
@@ -108,19 +125,14 @@ f_detectMarketStructure(lookbackBars) =>
 // ============================================================================
 
 // Detect Rally Base Rally (RBR) - DEMAND Zone
-// Pattern: Rally up → Base (consolidation) → Rally up again
 f_detectRBR(barsBack) =>
     if bar_index < barsBack + 20
         [false, 0.0, 0.0]
     
-    // Use ta.lowest to find the base low safely
     baseLow = ta.lowest(low, barsBack + 5)
     baseHigh = ta.highest(high, barsBack + 5)
     
-    // Check if we rallied before and after the base
-    // Prior bar should be above the base range
     priorRally = high[barsBack + 10] > baseHigh
-    // Current bar closes above the base range
     currentRally = close > baseHigh
     
     isRBR = priorRally and currentRally
@@ -128,7 +140,6 @@ f_detectRBR(barsBack) =>
     [isRBR, baseLow, baseHigh]
 
 // Detect Drop Base Drop (DBD) - SUPPLY Zone
-// Pattern: Drop down → Base (consolidation) → Drop down again
 f_detectDBD(barsBack) =>
     if bar_index < barsBack + 20
         [false, 0.0, 0.0]
@@ -136,7 +147,6 @@ f_detectDBD(barsBack) =>
     baseLow = ta.lowest(low, barsBack + 5)
     baseHigh = ta.highest(high, barsBack + 5)
     
-    // Check if we dropped before and after the base
     priorDrop = low[barsBack + 10] < baseLow
     currentDrop = close < baseLow
     
@@ -152,7 +162,6 @@ f_detectRBD(barsBack) =>
     baseLow = ta.lowest(low, barsBack + 5)
     baseHigh = ta.highest(high, barsBack + 5)
     
-    // Prior rally, current drop
     priorRally = high[barsBack + 10] > baseHigh
     currentDrop = close < baseLow
     
@@ -168,7 +177,6 @@ f_detectDBR(barsBack) =>
     baseLow = ta.lowest(low, barsBack + 5)
     baseHigh = ta.highest(high, barsBack + 5)
     
-    // Prior drop, current rally
     priorDrop = low[barsBack + 10] < baseLow
     currentRally = close > baseHigh
     
@@ -177,7 +185,112 @@ f_detectDBR(barsBack) =>
     [isDBR, baseLow, baseHigh]
 
 // ============================================================================
-// SECTION 6: SCORING SYSTEM
+// SECTION 6: HTF (HIGHER TIMEFRAME) ZONE DETECTION & PROJECTION
+// ============================================================================
+
+// Request HTF data and detect zones
+f_detectHTFZones() =>
+    htfClose = request.security(syminfo.tickerid, htfPrimary, close)
+    htfHigh = request.security(syminfo.tickerid, htfPrimary, high)
+    htfLow = request.security(syminfo.tickerid, htfPrimary, low)
+    
+    htfDemandDetected = false
+    htfSupplyDetected = false
+    
+    demandHigh = 0.0
+    demandLow = 0.0
+    supplyHigh = 0.0
+    supplyLow = 0.0
+    
+    // HTF Demand: close rallies above prior HTF high (institutional buying)
+    if htfClose > htfHigh[1]
+        htfDemandDetected := true
+        demandLow := htfLow
+        demandHigh := htfHigh
+    
+    // HTF Supply: close drops below prior HTF low (institutional selling)
+    if htfClose < htfLow[1]
+        htfSupplyDetected := true
+        supplyLow := htfLow
+        supplyHigh := htfHigh
+    
+    [htfDemandDetected, demandLow, demandHigh, htfSupplyDetected, supplyLow, supplyHigh]
+
+// Check if entry timeframe zone aligns with HTF zone
+f_isAlignedWithHTF(zoneLow, zoneHigh, zoneType) =>
+    if array.size(htfDemandZones) == 0 and array.size(htfSupplyZones) == 0
+        false
+    
+    aligned = false
+    
+    if zoneType == "DEMAND"
+        for i = 0 to array.size(htfDemandZones) - 1
+            htfZone = array.get(htfDemandZones, i)
+            // Entry zone overlaps with HTF demand zone
+            if zoneLow <= htfZone.high and zoneHigh >= htfZone.low
+                aligned := true
+                break
+    else if zoneType == "SUPPLY"
+        for i = 0 to array.size(htfSupplyZones) - 1
+            htfZone = array.get(htfSupplyZones, i)
+            // Entry zone overlaps with HTF supply zone
+            if zoneLow <= htfZone.high and zoneHigh >= htfZone.low
+                aligned := true
+                break
+    
+    aligned
+
+// ============================================================================
+// SECTION 7: ZONE TRACKING & EXPIRY
+// ============================================================================
+
+// Check if price has broken through zone with close outside
+f_isZoneBroken(zone) =>
+    if zone.zoneType == "DEMAND"
+        close < zone.lowPrice
+    else  // SUPPLY
+        close > zone.highPrice
+
+// Update touch count and check expiry
+f_updateZoneTouches(zone) =>
+    // Increment touch count if price touches zone
+    if zone.zoneType == "DEMAND"
+        if low <= zone.highPrice and high >= zone.lowPrice
+            zone.touchCount := zone.touchCount + 1
+    else
+        if low <= zone.highPrice and high >= zone.lowPrice
+            zone.touchCount := zone.touchCount + 1
+    
+    // Expire zone if broken with close outside or max touches exceeded
+    if f_isZoneBroken(zone) or zone.touchCount > maxZoneTouches
+        zone.isActive := false
+    
+    zone
+
+// ============================================================================
+// SECTION 8: RISK CALCULATIONS
+// ============================================================================
+
+// Calculate Stop Loss and Target based on zone and ATR
+f_calculateRiskLevels(zoneType, zoneHigh, zoneLow, atrValue) =>
+    slDistance = atrValue * (slBuffer / 100.0)
+    zoneSize = zoneHigh - zoneLow
+    
+    if zoneType == "DEMAND"
+        // SL below zone
+        riskLevel = zoneLow - slDistance
+        // Target above zone (3R profit)
+        targetLevel = zoneHigh + (zoneSize * riskRewardRatio)
+    else  // SUPPLY
+        // SL above zone
+        riskLevel = zoneHigh + slDistance
+        // Target below zone (3R profit)
+        targetLevel = zoneLow - (zoneSize * riskRewardRatio)
+    
+    [riskLevel, targetLevel]
+
+// ============================================================================
+// SECTION 9: SCORING SYSTEM
 // ============================================================================
 
 // Calculate APEX Score (0-100) based on weighted criteria
@@ -193,9 +306,9 @@ f_calculateAPEXScore(zoneType, zoneHigh, zoneLow, barIdx, departureStrength, bre
     w_liq = scoreLiquidity / totalWeight
     w_vol = scoreVolume / totalWeight
     
-    // Component scores (0-100) - EXPLICITLY DECLARE AS FLOAT
+    // Component scores (0-100)
     score_htf = float(htfAligned ? 100 : 50)
-    score_fresh = float(100 - ((bar_index - barIdx) / 50 * 100))  // Decay over 50 bars
+    score_fresh = float(100 - ((bar_index - barIdx) / 50 * 100))
     score_fresh := math.max(0.0, math.min(100.0, score_fresh))
     score_dept = float(departureStrength * 100)
     score_struct = float(breakOfStructure ? 100 : 60)
@@ -218,7 +331,7 @@ f_calculateAPEXScore(zoneType, zoneHigh, zoneLow, barIdx, departureStrength, bre
     math.min(100.0, math.max(0.0, finalScore))
 
 // ============================================================================
-// SECTION 7: ENTRY CONFIRMATION
+// SECTION 10: ENTRY CONFIRMATION
 // ============================================================================
 
 // Detect bullish engulfing
@@ -244,7 +357,7 @@ f_isRejectionCandle() =>
     (upperWick > bodySize * 1.5 or lowerWick > bodySize * 1.5) and bodySize > 0
 
 // ============================================================================
-// SECTION 8: VISUALIZATION
+// SECTION 11: VISUALIZATION
 // ============================================================================
 
 // Draw a supply or demand zone on chart
@@ -260,7 +373,8 @@ f_drawZone(zoneType, zoneLow, zoneHigh, zoneScore, barIdx) =>
             bottom = zoneLow,
             border_color = borderColor,
             border_width = 2,
-            bgcolor = zoneColor
+            bgcolor = zoneColor,
+            xloc = xloc.bar_index
         )
         
         if showScores
@@ -272,11 +386,54 @@ f_drawZone(zoneType, zoneLow, zoneHigh, zoneScore, barIdx) =>
                 textcolor = color.white,
                 color = labelColor,
                 style = label.style_label_left,
-                size = size.small
+                size = size.small,
+                xloc = xloc.bar_index
             )
 
+// Draw HTF zone as faint background
+f_drawHTFZone(zoneType, zoneLow, zoneHigh) =>
+    if showHTFZones
+        zoneColor = zoneType == "DEMAND" ? color_htf_demand : color_htf_supply
+        
+        box.new(
+            left = bar_index - 50,
+            top = zoneHigh,
+            right = bar_index,
+            bottom = zoneLow,
+            border_color = na,
+            bgcolor = zoneColor,
+            xloc = xloc.bar_index
+        )
+
+// Draw risk levels (SL and Target)
+f_drawRiskLevels(riskLevel, targetLevel) =>
+    if showRiskLevels
+        // Stop Loss line
+        line.new(
+            x1 = bar_index - 20,
+            y1 = riskLevel,
+            x2 = bar_index,
+            y2 = riskLevel,
+            color = color_sl,
+            width = 1,
+            style = line.style_dashed,
+            xloc = xloc.bar_index
+        )
+        
+        // Target line
+        line.new(
+            x1 = bar_index - 20,
+            y1 = targetLevel,
+            x2 = bar_index,
+            y2 = targetLevel,
+            color = color_target,
+            width = 1,
+            style = line.style_dashed,
+            xloc = xloc.bar_index
+        )
+
 // ============================================================================
-// SECTION 9: MAIN LOGIC
+// SECTION 12: MAIN LOGIC
 // ============================================================================
 
 // Update market structure
@@ -284,6 +441,22 @@ f_drawZone(zoneType, zoneLow, zoneHigh, zoneScore, barIdx) =>
 marketTrend := trend
 swingHigh := structureHigh
 swingLow := structureLow
+
+// Detect HTF zones
+[htfDemandDetected, htfDemandLow, htfDemandHigh, htfSupplyDetected, htfSupplyLow, htfSupplyHigh] = f_detectHTFZones()
+
+// Manage HTF zone arrays - keep only recent zones
+if htfDemandDetected
+    newHTFZone = HTFZone.new(htfDemandHigh, htfDemandLow, "DEMAND", bar_index)
+    array.push(htfDemandZones, newHTFZone)
+    if array.size(htfDemandZones) > 10
+        array.shift(htfDemandZones)
+
+if htfSupplyDetected
+    newHTFZone = HTFZone.new(htfSupplyHigh, htfSupplyLow, "SUPPLY", bar_index)
+    array.push(htfSupplyZones, newHTFZone)
+    if array.size(htfSupplyZones) > 10
+        array.shift(htfSupplyZones)
 
 // Detect patterns every bar
 [isRBR, rbrLow, rbrHigh] = f_detectRBR(baseCandleCount)
@@ -299,40 +472,73 @@ rejection = f_isRejectionCandle()
 // Calculate ATR for adaptive levels
 atr = ta.atr(14)
 
-// Check for departure strength (simplified)
+// Check for departure strength
 departureStrength = math.min(1.0, (high - low) / atr)
 
 // Process detected zones
 if isRBR and (tradingDirection == "Long Only" or tradingDirection == "Both")
-    apexScore = f_calculateAPEXScore("DEMAND", rbrHigh, rbrLow, bar_index, departureStrength, false, false, false, bullEngulf, trend == "BULLISH")
-    newZone = Zone.new(bar_index, rbrHigh, rbrLow, "DEMAND", apexScore, 0, true, bullEngulf, bullEngulf ? 1 : 0)
+    htfAligned = f_isAlignedWithHTF(rbrLow, rbrHigh, "DEMAND")
+    apexScore = f_calculateAPEXScore("DEMAND", rbrHigh, rbrLow, bar_index, departureStrength, false, false, false, bullEngulf, htfAligned)
+    [sl, tp] = f_calculateRiskLevels("DEMAND", rbrHigh, rbrLow, atr)
+    newZone = Zone.new(bar_index, rbrHigh, rbrLow, "DEMAND", apexScore, 0, true, bullEngulf, bullEngulf ? 1 : 0, htfAligned, sl, tp)
     activeZones.push(newZone)
     f_drawZone("DEMAND", rbrLow, rbrHigh, apexScore, bar_index)
+    f_drawRiskLevels(sl, tp)
 
 if isDBD and (tradingDirection == "Short Only" or tradingDirection == "Both")
-    apexScore = f_calculateAPEXScore("SUPPLY", dbdHigh, dbdLow, bar_index, departureStrength, false, false, false, bearEngulf, trend == "BEARISH")
-    newZone = Zone.new(bar_index, dbdHigh, dbdLow, "SUPPLY", apexScore, 0, true, bearEngulf, bearEngulf ? 1 : 0)
+    htfAligned = f_isAlignedWithHTF(dbdLow, dbdHigh, "SUPPLY")
+    apexScore = f_calculateAPEXScore("SUPPLY", dbdHigh, dbdLow, bar_index, departureStrength, false, false, false, bearEngulf, htfAligned)
+    [sl, tp] = f_calculateRiskLevels("SUPPLY", dbdHigh, dbdLow, atr)
+    newZone = Zone.new(bar_index, dbdHigh, dbdLow, "SUPPLY", apexScore, 0, true, bearEngulf, bearEngulf ? 1 : 0, htfAligned, sl, tp)
     activeZones.push(newZone)
     f_drawZone("SUPPLY", dbdLow, dbdHigh, apexScore, bar_index)
+    f_drawRiskLevels(sl, tp)
 
 if isRBD and (tradingDirection == "Short Only" or tradingDirection == "Both")
-    apexScore = f_calculateAPEXScore("SUPPLY", rbdHigh, rbdLow, bar_index, departureStrength, false, false, false, bearEngulf, trend == "BEARISH")
-    newZone = Zone.new(bar_index, rbdHigh, rbdLow, "SUPPLY", apexScore, 0, true, bearEngulf, bearEngulf ? 1 : 0)
+    htfAligned = f_isAlignedWithHTF(rbdLow, rbdHigh, "SUPPLY")
+    apexScore = f_calculateAPEXScore("SUPPLY", rbdHigh, rbdLow, bar_index, departureStrength, false, false, false, bearEngulf, htfAligned)
+    [sl, tp] = f_calculateRiskLevels("SUPPLY", rbdHigh, rbdLow, atr)
+    newZone = Zone.new(bar_index, rbdHigh, rbdLow, "SUPPLY", apexScore, 0, true, bearEngulf, bearEngulf ? 1 : 0, htfAligned, sl, tp)
     activeZones.push(newZone)
     f_drawZone("SUPPLY", rbdLow, rbdHigh, apexScore, bar_index)
+    f_drawRiskLevels(sl, tp)
 
 if isDBR and (tradingDirection == "Long Only" or tradingDirection == "Both")
-    apexScore = f_calculateAPEXScore("DEMAND", dbrHigh, dbrLow, bar_index, departureStrength, false, false, false, bullEngulf, trend == "BULLISH")
-    newZone = Zone.new(bar_index, dbrHigh, dbrLow, "DEMAND", apexScore, 0, true, bullEngulf, bullEngulf ? 1 : 0)
+    htfAligned = f_isAlignedWithHTF(dbrLow, dbrHigh, "DEMAND")
+    apexScore = f_calculateAPEXScore("DEMAND", dbrHigh, dbrLow, bar_index, departureStrength, false, false, false, bullEngulf, htfAligned)
+    [sl, tp] = f_calculateRiskLevels("DEMAND", dbrHigh, dbrLow, atr)
+    newZone = Zone.new(bar_index, dbrHigh, dbrLow, "DEMAND", apexScore, 0, true, bullEngulf, bullEngulf ? 1 : 0, htfAligned, sl, tp)
     activeZones.push(newZone)
     f_drawZone("DEMAND", dbrLow, dbrHigh, apexScore, bar_index)
+    f_drawRiskLevels(sl, tp)
+
+// Update zone tracking and manage expiry
+for i = 0 to array.size(activeZones) - 1
+    zone = array.get(activeZones, i)
+    updatedZone = f_updateZoneTouches(zone)
+    array.set(activeZones, i, updatedZone)
+    
+    // Draw HTF zones if aligned
+    if updatedZone.isHTFAligned and updatedZone.isActive
+        f_drawHTFZone(updatedZone.zoneType, updatedZone.lowPrice, updatedZone.highPrice)
+
+// Clean up expired zones
+if array.size(activeZones) > 50
+    for i = array.size(activeZones) - 1 to 0 by -1
+        zone = array.get(activeZones, i)
+        if not zone.isActive
+            array.remove(activeZones, i)
 
 // ============================================================================
-// SECTION 10: ALERTS
+// SECTION 13: ALERTS
 // ============================================================================
 
 if enableAlerts
     if isRBR and tradingDirection != "Short Only"
-        alert("APEX: DEMAND Zone Detected (RBR)", alert.freq_once_per_bar)
+        alert("APEX: DEMAND Zone Detected (RBR) | Score: " + str.tostring(math.round(f_calculateAPEXScore("DEMAND", rbrHigh, rbrLow, bar_index, departureStrength, false, false, false, bullEngulf, f_isAlignedWithHTF(rbrLow, rbrHigh, "DEMAND")))), alert.freq_once_per_bar)
     if isDBD and tradingDirection != "Long Only"
-        alert("APEX: SUPPLY Zone Detected (DBD)", alert.freq_once_per_bar)
+        alert("APEX: SUPPLY Zone Detected (DBD) | Score: " + str.tostring(math.round(f_calculateAPEXScore("SUPPLY", dbdHigh, dbdLow, bar_index, departureStrength, false, false, false, bearEngulf, f_isAlignedWithHTF(dbdLow, dbdHigh, "SUPPLY")))), alert.freq_once_per_bar)
+    if isRBD and tradingDirection != "Long Only"
+        alert("APEX: SUPPLY Zone Detected (RBD) | Score: " + str.tostring(math.round(f_calculateAPEXScore("SUPPLY", rbdHigh, rbdLow, bar_index, departureStrength, false, false, false, bearEngulf, f_isAlignedWithHTF(rbdLow, rbdHigh, "SUPPLY")))), alert.freq_once_per_bar)
+    if isDBR and tradingDirection != "Short Only"
+        alert("APEX: DEMAND Zone Detected (DBR) | Score: " + str.tostring(math.round(f_calculateAPEXScore("DEMAND", dbrHigh, dbrLow, bar_index, departureStrength, false, false, false, bullEngulf, f_isAlignedWithHTF(dbrLow, dbrHigh, "DEMAND")))), alert.freq_once_per_bar)
